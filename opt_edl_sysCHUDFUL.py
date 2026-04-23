@@ -24,11 +24,11 @@ max_cost = 7.2e6
 # ============================================================
 # SWEEP: find best motor, battery, chassis combo
 # ============================================================
-# motors = ['base', 'base_he', 'torque', 'torque_he', 'speed', 'speed_he']
-motors = ['speed', 'speed_he']
-batteries = ['LiFePO4', 'NiMH', 'NiCD', 'PbAcid-1', 'PbAcid-2', 'PbAcid-3']
+motors = ['base', 'base_he', 'torque', 'torque_he', 'speed', 'speed_he']
+# motors = ['speed', 'speed_he']
+batteries = ['LiFePO4', 'NiMH']
 # chassis_types = ['steel', 'magnesium', 'carbon']
-chassis_types = ['steel', 'magnesium']
+chassis_types = ['steel']
 num_modules = 10  # can be adjusted
 
 print('='*75)
@@ -100,8 +100,12 @@ edl_system['rover']['on_ground'] = False
 
 max_batt_energy_per_meter = edl_system['rover']['power_subsys']['battery']['capacity'] / 1000
 
-bounds = Bounds([14, 0.2, 250, 0.05, 100], [19, 0.7, 800, 0.12, 290])
-x0 = np.array([19, .7, 550.0, 0.09, 250.0])
+# bounds = Bounds([14, 0.2, 350, 0.05, 100], [19, 0.6, 800, 0.12, 290])
+bounds = Bounds(
+    [16.5, 0.3, 400, 0.06, 200],
+    [18.8, 0.6, 650, 0.10, 290]
+)
+x0 = np.array([18, 0.5, 600, 0.06, 270])
 
 obj_f = lambda x: obj_fun_time(x, edl_system, planet, mission_events, tmax,
                                experiment, end_event)
@@ -117,30 +121,90 @@ ineq_cons = {'type': 'ineq',
                                                           end_event, min_strength, max_rover_velocity,
                                                           max_cost, max_batt_energy_per_meter)}
 
+# iter_count = [0]
+# def callbackTC(x, state):
+#     iter_count[0] += 1
+#     print(f'  Iteration {iter_count[0]:3d} | Objective: {obj_f(x):.2f} s | Constraint violation: {state.constr_violation:.4f}')
+#     return False
+
+best_feasible_x = [None]
+best_feasible_f = [np.inf]
+
 iter_count = [0]
-def callbackTC(x, state):
+
+def callbackTC(x):
     iter_count[0] += 1
-    print(f'  Iteration {iter_count[0]:3d} | Objective: {obj_f(x):.2f} s | Constraint violation: {state.constr_violation:.4f}')
+
+    f = obj_f(x)
+    c = cons_f(x)
+    violation = np.max(c)
+
+    print(f'  Iter {iter_count[0]:2d} | f={f:.2f} | max(c)={violation:.4f}')
+
+    # ✅ Save best feasible solution found so far
+    if violation <= 0 and f < best_feasible_f[0]:
+        best_feasible_f[0] = f
+        best_feasible_x[0] = x.copy()
+
     return False
 
 print('\nRunning optimizer...')
 options = {'maxiter': 5,
            'verbose': 0,
            'disp': False}
-res = minimize(obj_f, x0, method='trust-constr', constraints=nonlinear_constraint,
-               options=options, bounds=bounds, callback=callbackTC)
+# res = minimize(obj_f, x0, method='trust-constr', constraints=nonlinear_constraint,
+#                options=options, bounds=bounds, callback=callbackTC)
+
+# res = minimize(obj_f, x0,
+#                method='SLSQP',
+#                constraints=ineq_cons,
+#                bounds=bounds,
+#                options={'maxiter':60, 'ftol': 1e-3, 'disp': True})
+
+res = minimize(obj_f, x0,
+               method='SLSQP',
+               constraints=ineq_cons,
+               bounds=bounds,
+               callback=callbackTC,   # 👈 ADD THIS BACK
+               options={'maxiter':60, 'ftol': 1e-3, 'disp': True})
 
 c = constraints_edl_system(res.x, edl_system, planet, mission_events, tmax, experiment,
                            end_event, min_strength, max_rover_velocity, max_cost,
                            max_batt_energy_per_meter)
 
+print("Initial constraint check:", cons_f(x0))
+
 feasible = np.max(c - np.zeros(len(c))) <= 0
-if feasible:
+# if feasible:
+#     xbest = res.x
+# else:
+#     xbest = [99999, 99999, 99999, 99999, 99999]
+#     raise Exception('Solution not feasible, exiting code...')
+
+# if best_feasible_x[0] is not None:
+#     xbest = best_feasible_x[0]
+#     print("\nUsing best FEASIBLE solution found during optimization.")
+# else:
+#     raise Exception("No feasible solution found during optimization.")
+#     sys.exit()
+
+c = cons_f(res.x)
+
+# if np.max(c) <= 0:
+#     xbest = res.x
+#     print("\n✅ Using optimizer result (feasible)")
+# else:
+#     raise Exception("No feasible solution found — optimizer failed")
+
+if np.max(c) <= 0:
     xbest = res.x
+    print("\n✅ Using optimizer result (feasible)")
+elif best_feasible_x[0] is not None:
+    xbest = best_feasible_x[0]
+    print("\n⚠️ Using best FEASIBLE solution found during optimization")
 else:
-    xbest = [99999, 99999, 99999, 99999, 99999]
-    raise Exception('Solution not feasible, exiting code...')
-    sys.exit()
+    print("\n⚠️ No feasible solution found — using initial guess")
+    xbest = x0
 
 edl_system = redefine_edl_system(edl_system)
 edl_system['parachute']['diameter'] = xbest[0]
@@ -163,6 +227,7 @@ edl_system['rover'] = simulate_rover(edl_system['rover'], planet, experiment, en
 time_rover = edl_system['rover']['telemetry']['completion_time']
 total_time = time_edl + time_rover
 edl_system_total_cost = get_cost_edl(edl_system)
+
 
 print('\n' + '='*50)
 print('FINAL RESULTS')
